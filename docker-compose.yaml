@@ -1,0 +1,221 @@
+version: '2.1'
+
+volumes:
+  grafana_data: {}
+  prometheus_data: {}
+  zoo_data: {}
+  zoo_datalog: {}
+  kafka_data: {}
+  flink_data: {} 
+  couchbase_data: {}
+services:
+  zookeeper1:
+    image: zookeeper:3.4.13
+    container_name: zookeeper1
+    hostname: zoo1
+    expose:
+      - "2181"
+    ports:
+      - "2181:2181"
+    volumes:
+      - zoo_data:/data
+      - zoo_datalog:/datalog
+      - ./zoo_logs:/logs
+    restart: always
+    environment:
+      - ZOO_MY_ID=1
+      - ZOO_SERVERS="server.1=0.0.0.0:2888:3888"
+
+  kafka1:
+      #image : wurstmeister/kafka:2.11-2.0.1
+      build: ./kafka
+      container_name: kafka1
+      hostname: kafka1
+      ports:
+        - "9092:9092"
+        - "9999:9999"
+      volumes:
+        - kafka_data:/kafka
+      environment:
+        - JMX_PORT=9999
+        - KAFKA_ADVERTISED_PORT=9092  
+        - KAFKA_BROKER_ID=1
+        - KAFKA_ZOOKEEPER_CONNECT=zookeeper1:2181
+        - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka1:9092
+        - KAFKA_ADVERTISED_HOST_NAME=kafka1
+        - KAFKA_OPTS=-javaagent:/usr/app/jmx_prometheus_javaagent-0.6.jar=7071:/usr/app/prom-jmx-agent-config.yml
+      depends_on:
+        - zookeeper1
+  kafka-jmx-exporter:
+    build: ./prometheus-jmx-exporter
+    expose:
+      - 8080
+    ports: 
+      - "8080:8080"
+    links:
+      - kafka1
+    environment:
+      - JMX_PORT=9999
+      - JMX_HOST=kafka1
+      - HTTP_PORT=8080
+      - JMX_EXPORTER_CONFIG_FILE=kafka.yml
+  jobmanager:
+    build:
+      context: ./flink
+    hostname: jobmgr1
+    expose:
+      - "6123"
+    ports:
+      - "8081:8081"
+      - "6123:6123"
+      - "9998:9999"
+    volumes:
+      - flink_data:/opt/flink/state_dir
+      - /flink_logs/jm:/opt/flink/log/
+    command: jobmanager
+    depends_on:
+      - zookeeper1
+    environment:
+      - JOB_MANAGER_RPC_ADDRESS=jobmanager
+      - zookeeperUrl=zookeeper1:2181
+  taskmanager1:
+    build:
+      context: ./flink
+    hostname: taskmgr1
+    expose:
+      - "6121"
+      - "6122"
+      - "8889"
+    ports:
+      - "8889:8889"
+    volumes:
+      - flink_data:/opt/flink/state_dir
+      - /flink_logs/tm1:/opt/flink/log/
+    command: taskmanager
+    depends_on:
+      - zookeeper1
+    environment:
+      - nodeId=node1
+      - zookeeperUrl=zookeeper1:2181
+      - JOB_MANAGER_RPC_ADDRESS=jobmanager
+
+
+  couchbase1:
+    image: couchbase:latest
+    hostname: couchbase1
+    container_name: couchbase1
+    ports:
+      - "8091-8094:8091-8094"
+      - "11210:11210"
+    volumes:
+      - couchbase_data:/opt/couchbase/var
+  couchbasesetup:
+    build:
+      context: ./couchbase
+    depends_on:
+      - couchbase1
+    volumes:
+      -  couchbase_data:/opt/couchbase/var
+
+
+  couchbase-exporter:
+    image: blakelead/couchbase-exporter
+    #image: travix/couchbase-exporter
+    #    build:
+    #  context: ./couchbase_exporter
+    expose:
+      - 9191
+      - 9119
+    ports:
+      - "9119:9119"
+      - "9191:9191"
+    depends_on:
+      - couchbase1
+    environment:
+            # - COUCHBASE_HOST=couchbase1
+            #- COUCHBASE_PORT=8091
+            #- COUCHBASE_USERNAME=Administrator
+            #- COUCHBASE_PASSWORD=password
+            #- PROMETHEUS_PORT:9119
+      - CB_EXPORTER_LISTEN_ADDR=0.0.0.0:9191 
+      #- CB_EXPORTER_TELEMETRY_PATH=/metrics 
+      #- CB_EXPORTER_SERVER_TIMEOUT=10s 
+      #- CB_EXPORTER_LOG_LEVEL=debug 
+      #- CB_EXPORTER_LOG_FORMAT=json 
+      - CB_EXPORTER_DB_URI=http://couchbase1:8091 
+      #- CB_EXPORTER_DB_TIMEOUT=10s 
+      - CB_EXPORTER_DB_USER=Administrator 
+      - CB_EXPORTER_DB_PASSWORD=password 
+      #- CB_EXPORTER_SCRAPE_CLUSTER=true 
+      #- CB_EXPORTER_SCRAPE_NODE=true 
+      #- CB_EXPORTER_SCRAPE_BUCKET=false 
+      #-  CB_EXPORTER_SCRAPE_XDCR=false 
+  prometheus:
+    image: prom/prometheus:v2.6.0
+    container_name: prometheus
+    volumes:
+      - ./prometheus/:/etc/prometheus/
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention=200h'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+    expose:
+      - 9090
+    ports:
+      - "9090:9090"
+  nodeexporter:
+    image: prom/node-exporter:v0.17.0
+    container_name: nodeexporter
+    user: root
+    privileged: true
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.ignored-mount-points=^/(sys|proc|dev|host|etc)($$|/)'
+    restart: unless-stopped
+    expose:
+      - 9100
+    ports:
+      - "9100:9100"
+  cadvisor:
+#    image: google/cadvisor:v0.32.0
+    image: google/cadvisor
+    container_name: cadvisor
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:rw
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /cgroup:/cgroup:ro #doesn't work on MacOS only for Linux
+    restart: unless-stopped
+    expose:
+      - 8080
+    ports:
+      - "9101:8080"
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    volumes: 
+      - grafana_data:/var/lib/grafana
+      - ./grafana/datasources:/etc/grafana/datasources
+      - ./grafana/dashboards:/etc/grafana/dashboards
+      - ./grafana/setup.sh:/setup.sh
+    entrypoint: /setup.sh
+    environment:
+      - GF_SECURITY_ADMIN_USER=${ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    restart: unless-stopped
+    expose:
+      - 3000
+    ports:
+      - "3000:3000"

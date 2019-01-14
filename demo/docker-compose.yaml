@@ -1,0 +1,43 @@
+version: '2.1'
+
+volumes:
+  grafana_data: {}
+  prometheus_data: {}
+  zoo_data: {}
+  zoo_datalog: {}
+  kafka_data: {}  
+services:
+  zookeeper1:
+    image: zookeeper:3.4.13
+    hostname: zoo1
+    expose:
+      - "2181"
+    ports:
+      - "2181:2181"
+    volumes:
+      - zoo_data:/data
+      - zoo_datalog:/datalog
+      - ./zoo_logs:/logs
+    restart: always
+    environment:
+      - ZOO_MY_ID=1
+      - ZOO_SERVERS="server.1=0.0.0.0:2888:3888"
+
+  kafka1:
+      #image : wurstmeister/kafka:2.11-2.0.1
+      build: ./kafka 
+      hostname: kafka1
+      ports:
+        - "9092:9092"
+      volumes:
+        - kafka_data:/kafka
+        - ./kafka:/app/
+      environment:
+        - KAFKA_BROKER_ID=1
+        - KAFKA_ZOOKEEPER_CONNECT=zookeeper1:2181
+        - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka1:9092
+        - KAFKA_ADVERTISED_HOST_NAME=kafka1
+        - KAFKA_ADVERTISED_PORT=9092
+        - KAFKA_OPTS='-javaagent:/usr/app/jmx_prometheus_javaagent-0.6.jar'
+      depends_on:
+        - zookeeper1
